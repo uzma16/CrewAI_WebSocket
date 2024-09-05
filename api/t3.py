@@ -1,0 +1,90 @@
+# Set the correct Groq API key and base URL
+
+import os
+import requests
+from autogen import Agent, AssistantAgent, UserProxyAgent,GroupChat,GroupChatManager
+
+
+os.environ["GROQ_API_KEY"] = "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"
+os.environ["GROQ_API_BASE"] = "https://api.groq.com/openai/v1"  # Ensure this is correct
+
+# Verify environment variables
+print("GROQ_API_KEY:", os.environ.get("GROQ_API_KEY"))
+print("GROQ_API_BASE:", os.environ.get("GROQ_API_BASE"))
+
+
+# Configuration for the Groq model now uses a function to encapsulate logic
+def get_llm_config(api_key, api_base):
+    return {
+        "cache_seed": 48,
+        "config_list": [{
+            "model": "gemma-7b-it",
+            "api_key": api_key,
+            "base_url": api_base
+        }],
+    }
+
+class ResumableGroupChatManager(GroupChatManager):
+    groupchat: GroupChat
+
+    def __init__(self, groupchat, history, **kwargs):
+        self._groupchat = groupchat
+        self.groupchat.speaker_selection_method = "auto"
+        # self.allow_repeat_speaker = False
+        if history:
+            self._groupchat.messages = history
+
+        super().__init__(self._groupchat, **kwargs)
+
+        if history:
+            self.restore_from_history(history)
+
+    def restore_from_history(self, history) -> None:
+        for message in history:
+            # broadcast the message to all agents except the speaker.  This idea is the same way GroupChat is implemented in AutoGen for new messages, this method simply allows us to replay old messages first.
+            for agent in self._groupchat.agents:
+                if agent != self:
+                    self.send(message, agent, request_reply=False, silent=True)
+
+user_proxy = UserProxyAgent(
+    name="User_proxy",
+    system_message="You are now interacting with the interview system.",
+    code_execution_config={"use_docker": False},
+)
+
+# Initialize the assistant agent
+interviewer = AssistantAgent(
+    name="Interviewer",
+    system_message='''I will give one (single) question at a time. My first question would be 'How can I assist you today?' Then, going forward, I will ask 
+            another question related to the user's problem only, because my work is to collect all the information about the user's problem by asking 
+            questions. So that when my planner team works to solve the problem or plan the solution, it will have all the information given
+            by the user. I will also ask about the timeline for the completion of the problem. 
+            Here the question should be a single string.
+            The output of my LLM should be in the format <Question 1> & every question should be enclosed in {}
+            For example:
+            {
+            Question 1 : "How can I assist you today?" (Single question at a time)
+            }
+            Remember my end goal is to collect information by asking single question at a time from user which will help planner team to plan the schedule for a given user problem''',
+    llm_config=get_llm_config(os.environ['GROQ_API_KEY'], os.environ['GROQ_API_BASE'])
+)
+
+group_chat = GroupChat(
+            agents=[
+                interviewer, user_proxy
+            ],
+            messages=[],
+        )
+
+manager = ResumableGroupChatManager(
+    name="Manager",
+    groupchat=group_chat,
+    llm_config=get_llm_config(os.environ['GROQ_API_KEY'], os.environ['GROQ_API_BASE']),
+    history=group_chat.messages
+)
+
+user_proxy.initiate_chat(
+            manager,
+            message="How can I assist you today?",
+        )
+
